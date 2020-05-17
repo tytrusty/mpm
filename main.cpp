@@ -1,178 +1,111 @@
 #include <igl/opengl/glfw/Viewer.h>
+#include <igl/opengl/glfw/imgui/ImGuiMenu.h>
+#include <igl/opengl/glfw/imgui/ImGuiHelpers.h>
+#include <Eigen/StdVector>
+#include <thread>
 #include <iostream>
-#include<Eigen/StdVector>
+#include <algorithm>
+#include "PhysicsHook.h"
+#include "MpmHook.h"
 
 using namespace Eigen;
 
-constexpr int kResolution = 64;
-constexpr int kDimensions = 3;
-constexpr float kTimestep = 1.0f;
-constexpr float kGravity = -0.05f;
+static PhysicsHook *hook = NULL;
 
-const Eigen::RowVector3d sea_green(70. / 255., 252. / 255., 167. / 255.);
-
-struct Particles {
-	MatrixXd x; // positions
-	MatrixXd v; // velocities
-	//MatrixXd C; // affine matrix
-	std::vector<Matrix3d, Eigen::aligned_allocator<Matrix3d>> C;
-
-	MatrixXd mass; // masses
-} particles;
-
-struct Grid {
-	MatrixXd v; // velocities
-	MatrixXd mass; // masses
-} grid;
-
-void init_particles(int width, int height) {
-	particles.x.resize(width*height, kDimensions);
-	particles.v = MatrixXd::Random(width*height, kDimensions);
-	particles.C.resize(width*height);
-	particles.mass.resize(width*height, 1);
-
-	for (int i = 0; i < width; ++i) {
-		for (int j = 0; j < height; ++j) {
-			particles.x.row(i*width + j) << double(i) / kResolution, double(j) / kResolution, 0.0;
-		}
-	}
-}
-
-void init_grid(int width, int height) {
-	grid.v.resize(width*height, kDimensions);
-	grid.mass.resize(width*height, 1);
-}
-
-void simulation_step(int width, int height) {
-
-	grid.v.setZero();
-	grid.mass.setZero();
-
-	int ncells = width * height;
-	int nparticles = particles.x.rows();
-
-	// Particles -> Grid
-	for (int i = 0; i < nparticles; ++i) {
-		Vector3d pos = particles.x.row(i) * kResolution;
-		Vector3d vel = particles.v.row(i);
-		double mass = particles.mass(i);
-
-		// Interpolation
-		Vector3i cell_idx = pos.cast<int>();
-		Vector3d diff = (pos - cell_idx.cast<double>()).array() - 0.5;
-		Matrix3d weights;
-		weights.row(0) = 0.5 * (0.5 - diff.array()).pow(2);
-		weights.row(1) = 0.75 - diff.array().pow(2); 
-		weights.row(2) = 0.5 * (0.5 + diff.array()).pow(2);
-
-		// for all surrounding 9 cells
-		for (int x = 0; x < 3; ++x) {
-			for (int y = 0; y < 3; ++y) {
-				double weight = weights(x, 0) * weights(y, 1);
-
-				Vector3i idx = Vector3i(cell_idx(0) + x - 1, cell_idx(0) + y - 1, 0);
-				Vector3d dist = (idx.cast<double>() - pos).array() + 0.5;
-				
-				Vector3d Q = particles.C[i] * dist;
-
-				// MPM course, equation 172
-				double mass_contrib = weight * mass;
-
-				// converting 2D index to 1D
-				int grid_i = idx(0) * kResolution + idx(1);
-				
-				double cell_mass = grid.mass(grid_i);
-
-				// scatter mass to the grid
-				grid.mass(grid_i) += mass_contrib;
-				grid.v.row(grid_i) += mass_contrib * (vel + Q);
-				// note: currently "cell.v" refers to MOMENTUM, not velocity!
-				// this gets corrected in the UpdateGrid step below.
-			}
-		}
-	}
-
-	// Velocity Updates.
-	for (int i = 0; i < ncells; ++i) {
-
-		if (grid.mass(i) > 0) {
-			// Converting momentum to velocity and applying gravity force.
-			grid.v.row(i) /= grid.mass(i);
-			grid.v.row(i) += kTimestep * Vector3d(0, kGravity, 0); 
-
-			// Enforcing boundaries.
-			int x = i / kResolution;
-			int y = i % kResolution;
-			if (x < 2 || x > kResolution - 3) { grid.v(i, 0) = 0; }
-			if (y < 2 || y > kResolution - 3) { grid.v(i, 1) = 0; }
-		}
-	}
-
-
-	// Grid -> Particles
-	for (int i = 0; i < nparticles; ++i) {
-
-		// reset particle velocity. we calculate it from scratch each step using the grid
-		particles.v.row(i).setZero();
-
-		Vector3d pos = particles.x.row(i) * kResolution;
-
-		// Interpolation
-		Vector3i cell_idx = pos.cast<int>();
-		Vector3d diff = (pos - cell_idx.cast<double>()).array() - 0.5;
-		Matrix<double, 3, 3> weights;
-		weights.row(0) = 0.5 * (0.5 - diff.array()).pow(2);
-		weights.row(1) = 0.75 - diff.array().pow(2);
-		weights.row(2) = 0.5 * (0.5 + diff.array()).pow(2);
-
-		// constructing affine per-particle momentum matrix from APIC / MLS-MPM.
-		// see APIC paper (https://web.archive.org/web/20190427165435/https://www.math.ucla.edu/~jteran/papers/JSSTS15.pdf), page 6
-		// below equation 11 for clarification. this is calculating C = B * (D^-1) for APIC equation 8,
-		// where B is calculated in the inner loop at (D^-1) = 4 is a constant when using quadratic interpolation functions
-		Matrix<double, 3, 3> B;
-		B.setZero();
-
-
-		for (int x = 0; x < 3; ++x) {
-			for (int y = 0; y < 3; ++y) {
-				double weight = weights(x, 0) * weights(y, 1);
-
-				Vector3i idx = Vector3i(cell_idx(0) + x - 1, cell_idx(0) + y - 1, 0);
-				Vector3d dist = (idx.cast<double>() - pos).array() + 0.5;
-
-				Vector3d weighted_vel = grid.v.row(i) * weight;
-
-				// APIC paper equation 10, constructing inner term for B
-				Matrix<double, 3, 3> b_term;
-				b_term << weighted_vel * dist(0), weighted_vel*dist(1), weighted_vel*dist(2);
-				B += b_term;
-				particles.v.row(i) += weighted_vel;
-			}
-		}
-
-		//Matrix<double, 3, 3, RowMajor> B2(B * 4);
-		//particles.C.row(i) = Map<RowVectorXd>(B2.data());
-
-		//// advect particles
-		//p.x += p.v * dt;
-
-		//// safety clamp to ensure particles don't exit simulation domain
-		//p.x = math.clamp(p.x, 1, grid_res - 2);
-
-	}
-
-
-}
-
-
-
-int main(int argc, char *argv[])
+void toggleSimulation()
 {
-	init_particles(64, 64);
-	init_grid(64, 64);
-	simulation_step(64, 64);
-	// Plot the mesh
+    if (!hook)
+        return;
+
+    if (hook->isPaused())
+        hook->run();
+    else
+        hook->pause();
+}
+
+void resetSimulation()
+{
+    if (!hook)
+        return;
+
+    hook->reset();
+}
+
+bool drawCallback(igl::opengl::glfw::Viewer &viewer)
+{
+    if (!hook)
+        return false;
+
+    hook->render(viewer);
+    return false;
+}
+
+bool keyCallback(igl::opengl::glfw::Viewer &viewer, unsigned int key, int modifiers)
+{
+    if (key == ' ') {
+        toggleSimulation();
+        return true;
+    }
+    return false;
+}
+
+bool mouseDownCallback(igl::opengl::glfw::Viewer &viewer, int button, int modifier) {
+    if (!hook)
+        return false;
+    return hook->mouseClicked(viewer, button);
+}
+
+bool mouseUpCallback(igl::opengl::glfw::Viewer &viewer, int button, int modifier) {
+    if (!hook)
+        return false;
+    return hook->mouseReleased(viewer, button);
+}
+
+bool mouseMoveCallback(igl::opengl::glfw::Viewer &viewer, int button, int modifier) {
+    if (!hook)
+        return false;
+    return hook->mouseMoved(viewer, button);
+}
+
+bool drawGUI(igl::opengl::glfw::imgui::ImGuiMenu &menu) {
+    if (ImGui::CollapsingHeader("Simulation Control", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::Button("Run/Pause Sim", ImVec2(-1, 0))) {
+            toggleSimulation();
+        }
+        if (ImGui::Button("Reset Sim", ImVec2(-1, 0))) {
+            resetSimulation();
+        }
+    }
+    hook->drawGUI(menu);
+    return false;
+}
+
+int main(int argc, char *argv[]) {
 	igl::opengl::glfw::Viewer viewer;
-	viewer.data().set_points(particles.x, sea_green);
+
+    hook = new MpmHook();
+    hook->reset();
+    viewer.core().is_animating = true;
+    viewer.core().animation_max_fps = 60;
+
+    // Center camera
+    Matrix3d bnd;
+    bnd << 0.0, 0.0, 0.0,
+           0.5, 0.5, 0.0,
+           1.0, 1.0, 0.0;
+    viewer.core().align_camera_center(bnd);
+
+    // Render points
+    viewer.callback_mouse_down = mouseDownCallback;
+    viewer.callback_mouse_up = mouseUpCallback;
+    viewer.callback_mouse_move = mouseMoveCallback;
+    viewer.callback_key_pressed = keyCallback;
+    viewer.callback_pre_draw = drawCallback;
+    
+    // Add UI
+    igl::opengl::glfw::imgui::ImGuiMenu menu;
+    viewer.plugins.push_back(&menu);
+    menu.callback_draw_viewer_menu = [&]() {drawGUI(menu); };
+
 	viewer.launch();
 }
