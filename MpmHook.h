@@ -3,6 +3,8 @@
 #include "PhysicsHook.h"
 #include <iostream>
 #include <Eigen/Core>
+#include <string>
+#include "igl/triangulated_grid.h"
 
 const Eigen::RowVector3d sea_green(70. / 255., 252. / 255., 167. / 255.);
 
@@ -24,10 +26,21 @@ struct MouseEvent
 struct Particles {
     Eigen::MatrixXd x; // positions
     Eigen::MatrixXd v; // velocities
+	Eigen::MatrixXd color;
 	Eigen::MatrixXd mass;
     Eigen::MatrixXd Jp;
 	std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> C;
 	std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> F;
+
+    void clear() {
+        x.resize(0,0);
+        v.resize(0,0);
+        mass.resize(0,0);
+        Jp.resize(0,0);
+        C.clear();
+        F.clear();
+    }
+
 };
 
 struct Grid {
@@ -46,12 +59,14 @@ public:
 
     virtual void updateGeometry() {
         renderP = particles_.x / resolution_;
+        renderC = particles_.color;
     }
 
     virtual bool simulationStep();
     virtual void renderGeometry(igl::opengl::glfw::Viewer &viewer) {
         viewer.data().clear();
         viewer.data().point_size = point_size_;
+        viewer.data().show_lines = 0;
 
         Eigen::Vector3d m(0.,0.,0.);
         Eigen::Vector3d M(1.,1.,1.);
@@ -81,30 +96,47 @@ public:
             Eigen::RowVector3d(1,0,0)
           );
 
-	    viewer.data().set_points(renderP, Eigen::RowVector3d(0.564706,0.847059,0.768627));
-        //viewer.data().set_mesh(V,F);
+	    viewer.data().set_points(renderP, renderC);//Eigen::RowVector3d(0.564706,0.147059,0.768627));
+
+        // Don't do this everytime
+        igl::triangulated_grid(resolution_,resolution_,grid_V,grid_F);
+        igl::colormap(igl::ColorMapType(render_color), T_, false, grid_C);
+        viewer.data().set_mesh(grid_V,grid_F);
+        viewer.data().set_colors(grid_C);
     }
+
+    virtual bool mouseClicked(igl::opengl::glfw::Viewer &viewer, int button);
+    virtual bool mouseReleased(igl::opengl::glfw::Viewer &viewer,  int button);
 
     private:
 
     void initParticles(int width, int height);
+    void addParticleBox(Eigen::Vector3d pos, Eigen::Vector3i lengths, double dx);
     void initGrid(int width, int height);
+    void buildLaplacian();
     //void generateCloud();
 
     Eigen::MatrixXd renderP;
-    Eigen::MatrixXd V;
-    Eigen::MatrixXi F;
+    Eigen::MatrixXd renderC;
 
+    Eigen::MatrixXd grid_V;
+    Eigen::MatrixXi grid_F;
+    Eigen::MatrixXd grid_C;
+
+    Eigen::SparseMatrix<double> L_;
+    Eigen::MatrixXd T_;
+    Eigen::MatrixXd f_;
     Particles particles_;
     Grid grid_;
 
-    int resolution_ = 64;
-    int dimensions_ = 3;
-    int point_size_ = 5;
-    double timestep_ = 0.05;
-    double gravity_ = -0.4;
-    double elastic_lambda_ = 10.0;
-    double elastic_mu_ = 20.0;
+    int resolution_;
+    int dimensions_;
+    int point_size_;
+    bool is_3d_;
+    double timestep_;
+    double gravity_;
+    double lambda_;
+    double mu_;
 
     double particle_mass = 1.0;
     double vol = 1.0;        // Particle Volume
@@ -128,6 +160,11 @@ public:
 
     bool enable_iso;
     int render_color;
+    
+    ImVec4 point_color_;
+    double box_dx_;
+    bool enable_addbox_;
+
 };
 
 #endif // MPMHOOK_H

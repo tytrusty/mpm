@@ -45,6 +45,9 @@ bool keyCallback(igl::opengl::glfw::Viewer &viewer, unsigned int key, int modifi
     if (key == ' ') {
         toggleSimulation();
         return true;
+    } else if (key == 'r') {
+        resetSimulation();
+        return true;
     }
     return false;
 }
