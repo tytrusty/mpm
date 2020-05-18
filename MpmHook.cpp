@@ -25,8 +25,9 @@ MpmHook::MpmHook() : PhysicsHook()
     lambda_ = 10.0;
     mu_ = 20.0;
     render_color = 1;
-    enable_iso  = true;
-    enable_heat = false;
+    enable_snow_ = true;
+    theta_compression_ = 2.5e-2; // values from snow paper
+    theta_stretch_ = 7.5e-3;
     box_dx_ = 0.5;
     point_color_= ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
     enable_addbox_ = false;
@@ -46,6 +47,7 @@ void MpmHook::addParticleBox(Vector3d pos, Vector3i lengths, double dx) {
     particles_.color.conservativeResize(new_rows, 3);
     particles_.Jp.conservativeResize(new_rows, 1);
     particles_.mass.conservativeResize(new_rows, 1);
+    particles_.mu.conservativeResize(new_rows, 1);
     particles_.C.resize(new_rows);
     particles_.F.resize(new_rows);
 
@@ -62,30 +64,8 @@ void MpmHook::addParticleBox(Vector3d pos, Vector3i lengths, double dx) {
             particles_.F[idx].setIdentity();
             particles_.Jp(idx) = 1.0;
             particles_.mass(idx) = 1.0;
+            particles_.mu(idx) = mu_;
             particles_.color.row(idx) << point_color_.x, point_color_.y, point_color_.z;
-        }
-    }
-
-}
-
-void MpmHook::initParticles(int width, int height) {
-    particles_.x.resize(width*height, dimensions_);
-    particles_.v = MatrixXd::Zero(width*height, dimensions_);
-    particles_.C.resize(width*height);
-    particles_.F.resize(width*height);
-    particles_.Jp.resize(width*height, 1);
-    particles_.Jp.setConstant(1.0);
-    particles_.mass.resize(width*height, 1);
-    particles_.mass.setConstant(1.0);
-    for (int i = 0; i < width; ++i) {
-        for (int j = 0; j < height; ++j) {
-            double x = (double(i)/2. + resolution_/4.0);
-            double y = (double(j)/2. + resolution_/4.0);
-            double z = resolution_/2.0;
-            particles_.x.row(i*width + j) << x,y,z;         
-            particles_.C[i*width+j].setZero();
-            particles_.F[i*width+j].setIdentity();
-            particles_.v(i*width + j, 2) = 0; // TODO 
         }
     }
 }
@@ -104,19 +84,20 @@ void MpmHook::drawGUI(igl::opengl::glfw::imgui::ImGuiMenu &menu)
     if (ImGui::CollapsingHeader("Simulation Options", ImGuiTreeNodeFlags_DefaultOpen))
     {
         ImGui::Checkbox("Enable 3D", &is_3d_);
+        ImGui::Checkbox("Enable Snow", &enable_snow_);
         ImGui::InputInt("Grid Resolution", &resolution_);
         ImGui::InputInt("Particle size", &point_size_);
         ImGui::InputDouble("Timestep", &timestep_);
         ImGui::InputDouble("Gravity", &gravity_);
         ImGui::InputDouble("Lambda", &lambda_);
         ImGui::InputDouble("Mu", &mu_);
-        ImGui::InputFloat("Solver Tolerance", &solverTol);//, 0, 0, 12);
+        ImGui::InputDouble("Critical Compression", &theta_compression_);
+        ImGui::InputDouble("Critical Stretch", &theta_stretch_);
     }
     const char* listbox_items[] = { "Inferno", "Jet", "Magma", "Parula", "Plasma", "Viridis"};
     if (ImGui::CollapsingHeader("Render Options"))
     {
         ImGui::ListBox("Render color", &render_color, listbox_items, IM_ARRAYSIZE(listbox_items), 4);
-        ImGui::Checkbox("Isocontour", &enable_iso);
     }
     if (ImGui::CollapsingHeader("Box Options"))
     {
@@ -205,7 +186,7 @@ void MpmHook::buildLaplacian() {
         int x = i / resolution_; // (resolution_*resolutoin_ for 3D)
         int y = i % resolution_;
 
-        double dt = 1e-1;
+        double dt = 1e-0;
 
         triplets.emplace_back(Triplet<double>(i, i, 1 + 4*dt));
 
@@ -244,8 +225,6 @@ void MpmHook::initSimulation()
     // Generating point cloud from mesh.
     //particles_.x = Util::meshToPoints(V, F) * resolution_;
 
-    //TODO if using mesh also need to init other fields (resize and whatnot)
-    //initParticles(resolution_/2., resolution_/2.); // create basic brick
     addParticleBox(Vector3d(resolution_/2.,resolution_/2.,16.), Vector3i(8,8,1), box_dx_);
     initGrid(resolution_, resolution_); // create domain
 
@@ -256,8 +235,8 @@ void MpmHook::initSimulation()
 }
 bool MpmHook::simulationStep() {
     // Initial Lamé parameters
-    const double mu_0 = E / (2 * (1 + nu));
-    const double lambda_0 = E * nu / ((1+nu) * (1 - 2 * nu));
+    ////////const double mu_0 = E / (2 * (1 + nu));
+    ////////const double lambda_0 = E * nu / ((1+nu) * (1 - 2 * nu));
 
     std::cout << "simulationStep() " << std::endl;
     grid_.v.setZero();
@@ -273,20 +252,6 @@ bool MpmHook::simulationStep() {
 
     bool failure = false;
 
-    ////////
-    ConjugateGradient<SparseMatrix<double>, Lower|Upper> solver;
-    SparseMatrix<double> I(T_.rows(), T_.rows());
-    I.setIdentity();
-    solver.compute(L_);
-    
-    T_ = solver.solve(f_);
-    f_ = T_; // Set new source!
-    f_( 0.5*resolution_*(resolution_ + 1)) = 5.0;
-    ////////
-
-
-
-
     // Particles -> Grid
     #pragma omp parallel for
     for (int i = 0; i < nparticles; ++i) {
@@ -297,6 +262,7 @@ bool MpmHook::simulationStep() {
         const Vector3d& vel = particles_.v.row(i);
         const Matrix3d& F = particles_.F[i];
         const double Jp = particles_.Jp(i);
+        const double mu = particles_.mu(i);
 
         double mass = particles_.mass(i);
 
@@ -309,25 +275,14 @@ bool MpmHook::simulationStep() {
         weights.row(2) = 0.5 * (0.5 + diff.array()).pow(2);
 
         // Lame parameters
-        double e = std::exp(hardening * (1.0 - Jp));
-        double mu = mu_0 * e;
-        double lambda = lambda_0 * e;
+        //double e = std::exp(hardening * (1.0 - Jp));
+        //double mu = mu_0 * e;
+        //double lambda = lambda_0 * e;
 
-        // Polar decomposition.
-        //Matrix3d R, S;
-        //igl::polar_dec(particles_.F[i], R, S);
-        //// Cauch stress
-        //double Dinv = 4 *  1 * 1;
-        //Matrix3d PF = (2 * mu * (particles_.F[i] - R) * particles_.F[i].transpose() 
-        //              + lambda * (J-1)*J * Matrix3d::Identity());
-        //Matrix3d stress = -(timestep_ * vol) * (Dinv * PF);
-        //Matrix3d affine = stress + mass * particles_.C[i];
         double volume = Jp;
-
-        // MPM course eq 48
-        // mu=20 lambda=10
+        // Neohoookean  MPM course eq 48
         Matrix3d F_T_inv = F.transpose().inverse();
-        Matrix3d P = mu_*(F - F_T_inv) + lambda_*std::log(Jp)*F_T_inv;
+        Matrix3d P = mu*(F - F_T_inv) + lambda_*std::log(Jp)*F_T_inv;
         Matrix3d stress = (1.0 / Jp) * P * F.transpose();
         stress = -volume*4*stress*timestep_; // eq 16 MLS-MPM
 
@@ -396,12 +351,25 @@ bool MpmHook::simulationStep() {
         }
     }
 
+    // -------------------------------------------------------- //
+    // Solve temperature field update.
+    ConjugateGradient<SparseMatrix<double>, Lower|Upper> solver;
+    SparseMatrix<double> I(T_.rows(), T_.rows());
+    I.setIdentity();
+    solver.compute(L_);
+    T_ = solver.solve(f_);
+    f_ = T_; // Set new source!
+    f_(0.5*resolution_*(resolution_ + 1)) = 10.0;
+    // ------------------------------------------------------- //
 
     // Grid -> Particles
     #pragma omp parallel for
     for (int i = 0; i < nparticles; ++i) {
         particles_.v.row(i).setZero();
         particles_.C[i].setZero();
+
+        //TODO ZEROING COLOR!
+        particles_.color.row(i).setZero();
 
         Vector3d pos = particles_.x.row(i);
 
@@ -412,7 +380,6 @@ bool MpmHook::simulationStep() {
         weights.row(0) = 0.5 * (0.5 - diff.array()).pow(2);
         weights.row(1) = 0.75 - diff.array().pow(2);
         weights.row(2) = 0.5 * (0.5 + diff.array()).pow(2);
-
 
         for (int x = 0; x < 3; ++x) {
             for (int y = 0; y < 3; ++y) {
@@ -430,7 +397,13 @@ bool MpmHook::simulationStep() {
                 // APIC paper equation 10, constructing inner term for B
                 particles_.C[i] += 4 * weighted_vel * dist.transpose();
                 particles_.v.row(i) += weighted_vel;
+                particles_.color.row(i) += Vector3d(weight*T_(grid_i),weight*T_(grid_i),weight*T_(grid_i));
             }
+        }
+        
+        if (particles_.color(i,0) > 0.8) {
+            particles_.mu(i) = 0.;
+            //std::cout << particles_.color(i,0) << std::endl;
         }
         // advect particles
         pos += particles_.v.row(i) * timestep_; 
@@ -441,9 +414,23 @@ bool MpmHook::simulationStep() {
         }
         particles_.x.row(i) = pos;
         particles_.F[i] = (Matrix3d::Identity() + timestep_ * particles_.C[i]) * particles_.F[i];
-        particles_.Jp(i) = std::abs(particles_.F[i].determinant());
-    }
 
-    //} // omp parallel
+        // Snow plasticity
+        double J = std::abs(particles_.F[i].determinant());
+        if (enable_snow_) {
+            JacobiSVD<Matrix3Xd> svd(particles_.F[i], ComputeFullU | ComputeFullV);
+            Vector3d S = svd.singularValues();
+
+            for (int j = 0; j < 3; ++j) {
+                S(j) = std::clamp(S(j), 1.0-theta_compression_, 1.0+theta_stretch_);
+            }
+
+            double Jp = particles_.Jp(i);
+            particles_.F[i] = svd.matrixU() * S.asDiagonal() * svd.matrixV().transpose();
+            double J_new = std::abs(particles_.F[i].determinant());
+            J = Jp * J/J_new;
+        } 
+        particles_.Jp(i) = std::clamp(J, 0.1, 10.0);
+    }
     return false;
 }

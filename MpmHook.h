@@ -29,18 +29,20 @@ struct Particles {
 	Eigen::MatrixXd color;
 	Eigen::MatrixXd mass;
     Eigen::MatrixXd Jp;
+	Eigen::MatrixXd mu;
 	std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> C;
 	std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> F;
 
     void clear() {
         x.resize(0,0);
         v.resize(0,0);
+        color.resize(0,0);
         mass.resize(0,0);
         Jp.resize(0,0);
+        mu.resize(0,0);
         C.clear();
         F.clear();
     }
-
 };
 
 struct Grid {
@@ -110,11 +112,9 @@ public:
 
     private:
 
-    void initParticles(int width, int height);
     void addParticleBox(Eigen::Vector3d pos, Eigen::Vector3i lengths, double dx);
     void initGrid(int width, int height);
     void buildLaplacian();
-    //void generateCloud();
 
     Eigen::MatrixXd renderP;
     Eigen::MatrixXd renderC;
@@ -138,12 +138,11 @@ public:
     double lambda_;
     double mu_;
 
-    double particle_mass = 1.0;
-    double vol = 1.0;        // Particle Volume
-    double hardening = 10.0; // Snow hardening factor
-    double E = 1e4;          // Young's Modulus
-    double nu = 0.2;         // Poisson ratio
-    const bool plastic = true;
+    //double particle_mass = 1.0;
+    //double vol = 1.0;        // Particle Volume
+    //double hardening = 10.0; // Snow hardening factor
+    //double E = 1e4;          // Young's Modulus
+    //double nu = 0.2;         // Poisson ratio
 
     std::string meshFile_;
     std::mutex mouseMutex;
@@ -154,11 +153,10 @@ public:
     Eigen::Vector3d curPos; // the current position of the mouse cursor in 3D
     bool mouseDown;
 
-    int solverIters;
-    float solverTol;
-    bool enable_heat;
+    bool enable_snow_;
+    double theta_compression_; // critical compression
+    double theta_stretch_;    // critical stretch
 
-    bool enable_iso;
     int render_color;
     
     ImVec4 point_color_;
