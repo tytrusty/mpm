@@ -181,6 +181,7 @@ public:
     ImVec4 point_color_;
     double box_dx_;
     bool enable_addbox_;
+    bool enable_heatgun_;
 
 };
 

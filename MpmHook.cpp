@@ -32,6 +32,7 @@ MpmHook::MpmHook() : PhysicsHook()
     box_dx_ = 0.5;
     point_color_= ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
     enable_addbox_ = false;
+    enable_heatgun_ = false;
     render_particle_heat_ = true;
     render_grid_heat_ = true;
     alpha_ = 55.0;
@@ -99,6 +100,7 @@ void MpmHook::drawGUI(igl::opengl::glfw::imgui::ImGuiMenu &menu)
         ImGui::InputDouble("Critical Compression", &theta_compression_);
         ImGui::InputDouble("Critical Stretch", &theta_stretch_);
         ImGui::InputDouble("Thermal Diffusivity", &alpha_);
+        ImGui::Checkbox("Enable heat gun (right click)", &enable_heatgun_);
     }
     const char* listbox_items[] = { "Inferno", "Jet", "Magma", "Parula", "Plasma", "Viridis"};
     if (ImGui::CollapsingHeader("Render Options", ImGuiTreeNodeFlags_DefaultOpen))
@@ -241,10 +243,15 @@ bool MpmHook::simulationStep() {
     //TODO aaa
     T_.setZero();
 
-    if (enable_addbox_ && (clickedVertex != -1) && (button_ == 0)) {
-        std::cout << "curPos : " << curPos << std::endl;
-        addParticleBox(curPos, Vector3i(8,8,1), box_dx_);
-        clickedVertex = -1;
+    if (clickedVertex != -1) {
+        if (enable_addbox_ && (button_ == 0)) {
+            addParticleBox(curPos, Vector3i(8,8,1), box_dx_);
+            clickedVertex = -1;
+        } else if (enable_heatgun_ && (button_ == 2)) {
+            Vector3i idx = curPos.cast<int>();
+            int grid_i = idx(0) * resolution_ + idx(1);
+            f_(grid_i) = 100.0;
+        }
     }
 
     int ncells = resolution_*resolution_;
@@ -290,13 +297,6 @@ bool MpmHook::simulationStep() {
         stress = -volume*4*stress*timestep_; // eq 16 MLS-MPM
 
         if (isnan(stress(0,0))) {
-            std::cout << "Stress is nan for particle : " << i << std::endl;
-            std::cout << "pos: \n" << pos << std::endl;
-            std::cout << "vel: \n" << vel << std::endl;
-            std::cout << "F: \n" << F << std::endl;
-            std::cout << "Jp: \n" << Jp << std::endl;
-            std::cout << "mass: \n" << mass << std::endl;
-            std::cout << "log Jp: " << std::log(Jp) << std::endl;
             failure = true;
             continue;
         }
