@@ -7,6 +7,7 @@
 #include <algorithm>
 #include "PhysicsHook.h"
 #include "MpmHook.h"
+#include <omp.h>
 
 using namespace Eigen;
 
@@ -85,6 +86,8 @@ bool drawGUI(igl::opengl::glfw::imgui::ImGuiMenu &menu) {
 
 int main(int argc, char *argv[]) {
 	igl::opengl::glfw::Viewer viewer;
+
+    omp_set_num_threads(12);
 
     hook = new MpmHook();
     hook->reset();

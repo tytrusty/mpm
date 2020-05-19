@@ -128,8 +128,30 @@ public:
 
     private:
 
+    int get_index(const Eigen::Vector3i& idx) {
+        if (is_3d_) {
+            return idx(0)*resolution_*resolution_ + idx(1)*resolution_ + idx(2);
+        } else {
+            return idx(0)*resolution_ + idx(1);
+        }
+    }
+
+    Eigen::Vector3i get_xyz(int i) {
+        int x,y,z;
+        if (is_3d_) {
+            x = i / (resolution_*resolution_);
+            y = (i / resolution_) % resolution_;
+            z = i % resolution_;
+        } else {
+            x = i / resolution_;
+            y = i % resolution_;
+            z = resolution_/2.;
+        }
+        return Eigen::Vector3i(x,y,z);
+    }
+
     void addParticleBox(Eigen::Vector3d pos, Eigen::Vector3i lengths, double dx);
-    void initGrid(int width, int height);
+    void initGrid(int size);
     void buildLaplacian();
 
     Eigen::MatrixXd renderP;
@@ -150,6 +172,7 @@ public:
     int resolution_;
     int dimensions_;
     int point_size_;
+    int grid_size_;
     bool is_3d_;
     double timestep_;
     double gravity_;
