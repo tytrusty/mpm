@@ -14,6 +14,7 @@ using namespace Eigen;
 MpmHook::MpmHook() : PhysicsHook()
 {
     clickedVertex = -1;
+    button_ = -1;
     meshFile_ = "bunny.off";
 
     is_3d_ = false;
@@ -31,6 +32,9 @@ MpmHook::MpmHook() : PhysicsHook()
     box_dx_ = 0.5;
     point_color_= ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
     enable_addbox_ = false;
+    render_particle_heat_ = true;
+    render_grid_heat_ = true;
+    alpha_ = 55.0;
 }
 
 void MpmHook::addParticleBox(Vector3d pos, Vector3i lengths, double dx) {
@@ -48,6 +52,7 @@ void MpmHook::addParticleBox(Vector3d pos, Vector3i lengths, double dx) {
     particles_.Jp.conservativeResize(new_rows, 1);
     particles_.mass.conservativeResize(new_rows, 1);
     particles_.mu.conservativeResize(new_rows, 1);
+    particles_.T.conservativeResize(new_rows, 1);
     particles_.C.resize(new_rows);
     particles_.F.resize(new_rows);
 
@@ -65,6 +70,7 @@ void MpmHook::addParticleBox(Vector3d pos, Vector3i lengths, double dx) {
             particles_.Jp(idx) = 1.0;
             particles_.mass(idx) = 1.0;
             particles_.mu(idx) = mu_;
+            particles_.T(idx) = 0.0;
             particles_.color.row(idx) << point_color_.x, point_color_.y, point_color_.z;
         }
     }
@@ -86,20 +92,23 @@ void MpmHook::drawGUI(igl::opengl::glfw::imgui::ImGuiMenu &menu)
         ImGui::Checkbox("Enable 3D", &is_3d_);
         ImGui::Checkbox("Enable Snow", &enable_snow_);
         ImGui::InputInt("Grid Resolution", &resolution_);
-        ImGui::InputInt("Particle size", &point_size_);
         ImGui::InputDouble("Timestep", &timestep_);
         ImGui::InputDouble("Gravity", &gravity_);
         ImGui::InputDouble("Lambda", &lambda_);
         ImGui::InputDouble("Mu", &mu_);
         ImGui::InputDouble("Critical Compression", &theta_compression_);
         ImGui::InputDouble("Critical Stretch", &theta_stretch_);
+        ImGui::InputDouble("Thermal Diffusivity", &alpha_);
     }
     const char* listbox_items[] = { "Inferno", "Jet", "Magma", "Parula", "Plasma", "Viridis"};
-    if (ImGui::CollapsingHeader("Render Options"))
+    if (ImGui::CollapsingHeader("Render Options", ImGuiTreeNodeFlags_DefaultOpen))
     {
         ImGui::ListBox("Render color", &render_color, listbox_items, IM_ARRAYSIZE(listbox_items), 4);
+        ImGui::Checkbox("Render particle temperature", &render_particle_heat_);
+        ImGui::Checkbox("Render grid temperature", &render_grid_heat_);
+        ImGui::InputInt("Particle size", &point_size_);
     }
-    if (ImGui::CollapsingHeader("Box Options"))
+    if (ImGui::CollapsingHeader("Box Options", ImGuiTreeNodeFlags_DefaultOpen))
     {
         ImGui::Checkbox("Enable placement", &enable_addbox_);
         ImGui::ColorEdit3("Point color", (float*)&point_color_);
@@ -108,12 +117,12 @@ void MpmHook::drawGUI(igl::opengl::glfw::imgui::ImGuiMenu &menu)
 }
 
 bool MpmHook::mouseClicked(igl::opengl::glfw::Viewer &viewer, int button) {
-    if(button != 0)
-        return false;
+    std::cout << "button: " << button << std::endl;
 
     render_mutex.lock();
 
     MouseEvent me;
+    me.button = button;
     int fid;
     Eigen::Vector3f bc;
     // Cast a ray in the view direction starting from the mouse position
@@ -124,6 +133,7 @@ bool MpmHook::mouseClicked(igl::opengl::glfw::Viewer &viewer, int button) {
     {
         me.type = MouseEvent::ME_CLICKED;
         me.vertex = grid_F(fid,0);
+        me.pos = grid_V.row(me.vertex) * resolution_;
     }
     else
     {
@@ -149,26 +159,14 @@ bool MpmHook::mouseReleased(igl::opengl::glfw::Viewer &viewer,  int button) {
 void MpmHook::tick()
 {
     mouseMutex.lock();
-    for (MouseEvent me : mouseEvents)
-    {
-        if (me.type == MouseEvent::ME_CLICKED)
-        {
+    for (MouseEvent me : mouseEvents) {
+        if (me.type == MouseEvent::ME_CLICKED) {
             curPos = me.pos;
             clickedVertex = me.vertex;
-            mouseDown = true;
+            button_ = me.button;
         }
-        if (me.type == MouseEvent::ME_RELEASED)
-        {
+        if (me.type == MouseEvent::ME_RELEASED) {
             clickedVertex = -1;
-            mouseDown = false;
-        }
-        if (me.type == MouseEvent::ME_DRAGGED)
-        {
-            if (mouseDown)
-            {
-                curPos = me.pos;
-                clickedVertex = me.vertex;
-            }
         }
     }
     mouseEvents.clear();
@@ -182,26 +180,26 @@ void MpmHook::buildLaplacian() {
 
     std::vector<Triplet<double>> triplets;
 
+    double dt = 1e-0 * alpha_;
+
     for (int i = 0; i < T_.rows(); ++i) {
         int x = i / resolution_; // (resolution_*resolutoin_ for 3D)
         int y = i % resolution_;
 
-        double dt = 1e-0;
+        if (grid_.mass(i) > 1e-7) {
 
         triplets.emplace_back(Triplet<double>(i, i, 1 + 4*dt));
 
         if ((x+1) < resolution_)
             triplets.emplace_back(Triplet<double>(i, (x+1)*resolution_ + y, -dt));
-
         if ((x-1) >= 0)
             triplets.emplace_back(Triplet<double>(i, (x-1)*resolution_ + y, -dt));
-
         if ((y+1) < resolution_)
             triplets.emplace_back(Triplet<double>(i, x*resolution_ + (y+1), -dt));
-
         if ((y-1) >= 0)
             triplets.emplace_back(Triplet<double>(i, x*resolution_ + (y-1), -dt));
 
+        } else {  triplets.emplace_back(Triplet<double>(i, i, dt)); }
     }
     L_.setFromTriplets(triplets.begin(), triplets.end());
 }
@@ -209,7 +207,6 @@ void MpmHook::buildLaplacian() {
 void MpmHook::initSimulation()
 {
     Eigen::initParallel();
-    prevClicked = -1;
 
     particles_.clear();
 
@@ -230,21 +227,24 @@ void MpmHook::initSimulation()
 
     T_ = MatrixXd::Zero(resolution_*resolution_, 1); // Temperature
     f_ = MatrixXd::Zero(resolution_*resolution_, 1); // Source
-    f_( 0.5*resolution_*(resolution_ + 1)) = 1.0;
     buildLaplacian();
+
+    grid_V.resize(0,0);
+    grid_F.resize(0,0);
+    igl::triangulated_grid(resolution_,resolution_,grid_V,grid_F);
 }
 bool MpmHook::simulationStep() {
-    // Initial Lamé parameters
-    ////////const double mu_0 = E / (2 * (1 + nu));
-    ////////const double lambda_0 = E * nu / ((1+nu) * (1 - 2 * nu));
-
-    std::cout << "simulationStep() " << std::endl;
     grid_.v.setZero();
     grid_.mass.setZero();
 
-    if (enable_addbox_ && clickedVertex != -1) {
-        Vector3d pos = grid_V.row(clickedVertex) * resolution_;
-        addParticleBox(pos, Vector3i(8,8,1), box_dx_);
+    f_.setZero();
+    //TODO aaa
+    T_.setZero();
+
+    if (enable_addbox_ && (clickedVertex != -1) && (button_ == 0)) {
+        std::cout << "curPos : " << curPos << std::endl;
+        addParticleBox(curPos, Vector3i(8,8,1), box_dx_);
+        clickedVertex = -1;
     }
 
     int ncells = resolution_*resolution_;
@@ -275,6 +275,9 @@ bool MpmHook::simulationStep() {
         weights.row(2) = 0.5 * (0.5 + diff.array()).pow(2);
 
         // Lame parameters
+        // Initial Lamé parameters
+        //const double mu_0 = E / (2 * (1 + nu));
+        //const double lambda_0 = E * nu / ((1+nu) * (1 - 2 * nu));
         //double e = std::exp(hardening * (1.0 - Jp));
         //double mu = mu_0 * e;
         //double lambda = lambda_0 * e;
@@ -298,7 +301,6 @@ bool MpmHook::simulationStep() {
             continue;
         }
 
-        //std::cout << "Stress: \n" << stress << std::endl;
         // for all surrounding 9 cells
         for (int x = 0; x < 3; ++x) {
             for (int y = 0; y < 3; ++y) {
@@ -321,12 +323,14 @@ bool MpmHook::simulationStep() {
                 Vector3d neohookean_momentum = (weight*stress) * dist;
                 vel_momentum += neohookean_momentum;
 
-
                 // scatter mass and momentum contributions to the grid
                 #pragma omp critical
                 {
                     grid_.mass(grid_i) += mass_contrib;
                     grid_.v.row(grid_i) += vel_momentum;
+
+                    // TODO aaa
+                    f_(grid_i) += mass_contrib * particles_.T(i);
                 }
             }
         }
@@ -338,7 +342,7 @@ bool MpmHook::simulationStep() {
     #pragma omp parallel for
     for (int i = 0; i < ncells; ++i) {
 
-        if (grid_.mass(i) > 0) {
+        if (grid_.mass(i) > 1e-7) {
             // Converting momentum to velocity and applying gravity force.
             grid_.v.row(i) /= grid_.mass(i);
             grid_.v.row(i) += timestep_ * Vector3d(0, gravity_, 0); 
@@ -348,28 +352,45 @@ bool MpmHook::simulationStep() {
             int y = i % resolution_;
             if (x < 2 || x > resolution_ - 3) { grid_.v(i, 0) = 0; }
             if (y < 2 || y > resolution_ - 3) { grid_.v(i, 1) = 0; }
+
+            //std::cout << "f_(i): " << f_(i) << std::endl;
+            //std::cout << "T_(i): " << T_(i) << std::endl;
+        } else {
+            // cells that do no receive mass are considered air cells
+            // so the temperature is zeroed out.
+            // TODO aaa
+            f_(i) = 0.5;
+
         }
     }
 
     // -------------------------------------------------------- //
+    //std::cout << " f_ : " << f_ << std::endl;
+    //f_ = T_; // Set new source!
+    f_(0.5*resolution_*(resolution_ + 1)) = 10.0;
     // Solve temperature field update.
+    buildLaplacian();
     ConjugateGradient<SparseMatrix<double>, Lower|Upper> solver;
     SparseMatrix<double> I(T_.rows(), T_.rows());
     I.setIdentity();
     solver.compute(L_);
     T_ = solver.solve(f_);
-    f_ = T_; // Set new source!
-    f_(0.5*resolution_*(resolution_ + 1)) = 10.0;
     // ------------------------------------------------------- //
+
+    #pragma omp parallel for
+    for (int i = 0; i < ncells; ++i) {
+        if (grid_.mass(i) < 1e-7) {
+            T_(i) = 0.;
+        }
+    }
+
+    particles_.v.setZero();
+    particles_.T.setZero();
 
     // Grid -> Particles
     #pragma omp parallel for
     for (int i = 0; i < nparticles; ++i) {
-        particles_.v.row(i).setZero();
         particles_.C[i].setZero();
-
-        //TODO ZEROING COLOR!
-        particles_.color.row(i).setZero();
 
         Vector3d pos = particles_.x.row(i);
 
@@ -397,14 +418,15 @@ bool MpmHook::simulationStep() {
                 // APIC paper equation 10, constructing inner term for B
                 particles_.C[i] += 4 * weighted_vel * dist.transpose();
                 particles_.v.row(i) += weighted_vel;
-                particles_.color.row(i) += Vector3d(weight*T_(grid_i),weight*T_(grid_i),weight*T_(grid_i));
+                particles_.T(i) += weight * T_(grid_i);
             }
         }
         
-        if (particles_.color(i,0) > 0.8) {
+        // Melt
+        if (particles_.T(i) > 0.8) {
             particles_.mu(i) = 0.;
-            //std::cout << particles_.color(i,0) << std::endl;
         }
+
         // advect particles
         pos += particles_.v.row(i) * timestep_; 
         // clamp to ensure particles don't exit simulation domain
@@ -432,5 +454,6 @@ bool MpmHook::simulationStep() {
         } 
         particles_.Jp(i) = std::clamp(J, 0.1, 10.0);
     }
+    //return true;
     return false;
 }

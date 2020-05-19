@@ -20,7 +20,16 @@ struct MouseEvent
 
     METype type;
     int vertex;
+    int button;
     Eigen::Vector3d pos;
+};
+
+struct Material {
+    double solid_mu;
+    double lambda_mu;
+    double alpha;
+    double melting_point;
+    //double specific_heat;
 };
 
 struct Particles {
@@ -30,8 +39,10 @@ struct Particles {
 	Eigen::MatrixXd mass;
     Eigen::MatrixXd Jp;
 	Eigen::MatrixXd mu;
+    Eigen::MatrixXd T;
 	std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> C;
 	std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> F;
+    int material_id = 0;
 
     void clear() {
         x.resize(0,0);
@@ -40,6 +51,7 @@ struct Particles {
         mass.resize(0,0);
         Jp.resize(0,0);
         mu.resize(0,0);
+        T.resize(0,0);
         C.clear();
         F.clear();
     }
@@ -61,7 +73,11 @@ public:
 
     virtual void updateGeometry() {
         renderP = particles_.x / resolution_;
-        renderC = particles_.color;
+        if (render_particle_heat_) {
+            igl::colormap(igl::ColorMapType(render_color), particles_.T, false, renderC);
+        } else {
+            renderC = particles_.color;;
+        }
     }
 
     virtual bool simulationStep();
@@ -98,13 +114,13 @@ public:
             Eigen::RowVector3d(1,0,0)
           );
 
-	    viewer.data().set_points(renderP, renderC);//Eigen::RowVector3d(0.564706,0.147059,0.768627));
+	    viewer.data().set_points(renderP, renderC);
 
-        // Don't do this everytime
-        igl::triangulated_grid(resolution_,resolution_,grid_V,grid_F);
-        igl::colormap(igl::ColorMapType(render_color), T_, false, grid_C);
-        viewer.data().set_mesh(grid_V,grid_F);
-        viewer.data().set_colors(grid_C);
+        if (render_grid_heat_) {
+            igl::colormap(igl::ColorMapType(render_color), T_, false, grid_C);
+            viewer.data().set_mesh(grid_V,grid_F);
+            viewer.data().set_colors(grid_C);
+        }
     }
 
     virtual bool mouseClicked(igl::opengl::glfw::Viewer &viewer, int button);
@@ -129,6 +145,8 @@ public:
     Particles particles_;
     Grid grid_;
 
+    std::vector<Material> materials;
+
     int resolution_;
     int dimensions_;
     int point_size_;
@@ -137,6 +155,7 @@ public:
     double gravity_;
     double lambda_;
     double mu_;
+    double alpha_; // thermal diffusivity
 
     //double particle_mass = 1.0;
     //double vol = 1.0;        // Particle Volume
@@ -147,17 +166,17 @@ public:
     std::string meshFile_;
     std::mutex mouseMutex;
     std::vector<MouseEvent> mouseEvents;
-    int clickedVertex; // the currently selected vertex (-1 if no vertex)
-    int prevClicked;
-    double clickedz;
     Eigen::Vector3d curPos; // the current position of the mouse cursor in 3D
-    bool mouseDown;
+    int clickedVertex; // the currently selected vertex (-1 if no vertex)
+    int button_;
 
     bool enable_snow_;
     double theta_compression_; // critical compression
     double theta_stretch_;    // critical stretch
 
     int render_color;
+    bool render_particle_heat_ = false;
+    bool render_grid_heat_ = false;
     
     ImVec4 point_color_;
     double box_dx_;
