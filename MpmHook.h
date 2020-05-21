@@ -29,6 +29,7 @@ struct Material {
     double lambda_mu;
     double alpha;
     double melting_point;
+    int transition_heat; // simple counter
     //double specific_heat;
 };
 
@@ -40,9 +41,24 @@ struct Particles {
     Eigen::MatrixXd Jp;
 	Eigen::MatrixXd mu;
     Eigen::MatrixXd T;
+    Eigen::MatrixXi melting_energy;
+    Eigen::MatrixXd material_id;
 	std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> C;
 	std::vector<Eigen::Matrix3d, Eigen::aligned_allocator<Eigen::Matrix3d>> F;
-    int material_id = 0;
+
+    void resize(int new_rows) {
+        x.conservativeResize(new_rows, 3);
+        v.conservativeResize(new_rows, 3);
+        color.conservativeResize(new_rows, 3);
+        Jp.conservativeResize(new_rows, 1);
+        mass.conservativeResize(new_rows, 1);
+        mu.conservativeResize(new_rows, 1);
+        T.conservativeResize(new_rows, 1);
+        material_id.conservativeResize(new_rows, 1);
+        melting_energy.conservativeResize(new_rows,1);
+        C.resize(new_rows);
+        F.resize(new_rows);
+    }
 
     void clear() {
         x.resize(0,0);
@@ -52,6 +68,8 @@ struct Particles {
         Jp.resize(0,0);
         mu.resize(0,0);
         T.resize(0,0);
+        material_id.resize(0,0);
+        melting_energy.resize(0,0);
         C.clear();
         F.clear();
     }
@@ -59,7 +77,9 @@ struct Particles {
 
 struct Grid {
     Eigen::MatrixXd v;    // velocities
-	Eigen::MatrixXd mass; // masses
+	Eigen::MatrixXd mass;  // masses
+	Eigen::MatrixXd alpha;
+
 };
 
 class MpmHook : public PhysicsHook
@@ -117,7 +137,12 @@ public:
 	    viewer.data().set_points(renderP, renderC);
 
         if (render_grid_heat_) {
-            igl::colormap(igl::ColorMapType(render_color), T_, false, grid_C);
+            if (is_3d_) {
+                Eigen::MatrixXd zero = Eigen::MatrixXd::Zero(resolution_*resolution_,1);
+                igl::colormap(igl::ColorMapType(render_color), zero, false, grid_C);
+            } else {
+                igl::colormap(igl::ColorMapType(render_color), T_, false, grid_C);
+            }
             viewer.data().set_mesh(grid_V,grid_F);
             viewer.data().set_colors(grid_C);
         }
@@ -151,6 +176,7 @@ public:
     }
 
     void addParticleBox(Eigen::Vector3d pos, Eigen::Vector3i lengths, double dx);
+    void addParticleMesh();
     void initGrid(int size);
     void buildLaplacian();
 
@@ -167,7 +193,7 @@ public:
     Particles particles_;
     Grid grid_;
 
-    std::vector<Material> materials;
+    std::vector<Material> materials_;
 
     int resolution_;
     int dimensions_;
@@ -179,14 +205,17 @@ public:
     double lambda_;
     double mu_;
     double alpha_; // thermal diffusivity
-
-    //double particle_mass = 1.0;
-    //double vol = 1.0;        // Particle Volume
-    //double hardening = 10.0; // Snow hardening factor
-    //double E = 1e4;          // Young's Modulus
-    //double nu = 0.2;         // Poisson ratio
+    double melting_point_;
+    int transition_heat_; // simple counter
+    double initial_temperature_;
+    bool use_global_lame_; // use global lame value for particles
 
     std::string meshFile_;
+    int mesh_points_;
+    bool enable_mesh_;
+    double mesh_scale_;
+    double mesh_offset_;
+
     std::mutex mouseMutex;
     std::vector<MouseEvent> mouseEvents;
     Eigen::Vector3d curPos; // the current position of the mouse cursor in 3D
@@ -205,6 +234,8 @@ public:
     double box_dx_;
     bool enable_addbox_;
     bool enable_heatgun_;
+    bool enable_heat_;
+    bool enable_air_;
 
 };
 

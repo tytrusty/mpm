@@ -16,48 +16,56 @@ MpmHook::MpmHook() : PhysicsHook()
     clickedVertex = -1;
     button_ = -1;
     meshFile_ = "bunny.off";
+    mesh_points_ = 10000;
+    mesh_scale_ = 1.5;
+    mesh_offset_ = 0.3;
+    enable_mesh_ = false;
 
     is_3d_ = false;
+    enable_heat_ = false;
+    enable_air_ = false;
+    use_global_lame_ = false;
     resolution_ = 32;
     dimensions_ = 3;
-    point_size_ = 5;
+    point_size_ = 11;
     timestep_ = 0.1;
     gravity_ = -0.4;
     lambda_ = 10.0;
     mu_ = 20.0;
     render_color = 1;
-    enable_snow_ = true;
+    enable_snow_ = false;
     theta_compression_ = 2.5e-2; // values from snow paper
     theta_stretch_ = 7.5e-3;
     box_dx_ = 0.5;
     point_color_= ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
     enable_addbox_ = false;
     enable_heatgun_ = false;
-    render_particle_heat_ = true;
+    render_particle_heat_ = false;
     render_grid_heat_ = true;
     alpha_ = 55.0;
+    melting_point_ = 0.8;
+    transition_heat_ = 5;
+    initial_temperature_ = 0.;
 }
 
 void MpmHook::addParticleBox(Vector3d pos, Vector3i lengths, double dx) {
     int r0 = particles_.x.rows();
-    int c0 = particles_.x.cols();
 
     lengths = (lengths.cast<double>().array() / dx).cast<int>();
     if (!is_3d_) {
         lengths(2) = 1;
     }
 
-    int new_rows = r0 + lengths.prod();
+    // Create new material for box.
+    int id = materials_.size();
+    Material mat;
+    mat.alpha = alpha_;
+    mat.melting_point = melting_point_;
+    mat.transition_heat = transition_heat_;
+    materials_.emplace_back(mat);
 
-    particles_.x.conservativeResize(new_rows, dimensions_);
-    particles_.v.conservativeResize(new_rows, dimensions_);
-    particles_.color.conservativeResize(new_rows, 3);
-    particles_.Jp.conservativeResize(new_rows, 1);
-    particles_.mass.conservativeResize(new_rows, 1);
-    particles_.mu.conservativeResize(new_rows, 1);
-    particles_.T.conservativeResize(new_rows, 1);
-    particles_.C.resize(new_rows);
-    particles_.F.resize(new_rows);
+    int new_rows = r0 + lengths.prod();
+    particles_.resize(new_rows);
 
     for (int i = 0; i < lengths(0); ++i) {
         for (int j = 0; j < lengths(1); ++j) {
@@ -71,13 +79,13 @@ void MpmHook::addParticleBox(Vector3d pos, Vector3i lengths, double dx) {
                 }
 
                 int idx;
-                
                 if (!is_3d_) {
                     idx = r0 + i*lengths(0) + j;   
                 } else {
                     idx = r0 + i*lengths(0)*lengths(1) + j*lengths(1) + k;   
                 }
 
+                particles_.material_id(idx) = id;
                 particles_.x.row(idx) << x,y,z;         
                 particles_.v.row(idx) = Vector3d::Zero();
                 particles_.C[idx].setZero();
@@ -85,7 +93,8 @@ void MpmHook::addParticleBox(Vector3d pos, Vector3i lengths, double dx) {
                 particles_.Jp(idx) = 1.0;
                 particles_.mass(idx) = 1.0;
                 particles_.mu(idx) = mu_;
-                particles_.T(idx) = 0.0;
+                particles_.T(idx) = initial_temperature_;
+                particles_.melting_energy(idx) = 0;
                 particles_.color.row(idx) << point_color_.x + double(i)/lengths(0)/5,
                                              point_color_.y + double(j)/lengths(1)/5,
                                              point_color_.z + double(k)/lengths(2)/5;
@@ -94,9 +103,61 @@ void MpmHook::addParticleBox(Vector3d pos, Vector3i lengths, double dx) {
     }
 }
 
+void MpmHook::addParticleMesh() {
+    // Reading in mesh.
+    MatrixXd V;
+    MatrixXi F;
+    Util::readMesh(meshFile_, V, F);
+
+    // Scaling mesh to fill bounding box.
+    Eigen::Vector3d min = V.colwise().minCoeff();
+    V = V.rowwise() - min.transpose();
+    V = V / (V.maxCoeff() + 2./resolution_) / mesh_scale_;
+    V = V.array() + mesh_offset_;
+
+    // Generating point cloud from mesh.
+    MatrixXd P = Util::meshToPoints(V, F, mesh_points_) * resolution_;
+
+    // Create new material for box.
+    int id = materials_.size();
+    Material mat;
+    mat.alpha = alpha_;
+    mat.melting_point = melting_point_;
+    mat.transition_heat = transition_heat_;
+    materials_.emplace_back(mat);
+
+    int r0 = particles_.x.rows();
+    int new_rows = r0 + P.rows();
+    particles_.resize(new_rows);
+
+    for (int i = 0; i < P.rows(); ++i) {
+        Vector3d p = P.row(i);
+        
+        if (!is_3d_) {
+            p(2) = resolution_/2.0;
+        }
+   
+        int idx = r0 + i;
+        particles_.material_id(idx) = id;
+        particles_.x.row(idx) = p;        
+        particles_.v.row(idx) = Vector3d::Zero();
+        particles_.C[idx].setZero();
+        particles_.F[idx].setIdentity();
+        particles_.Jp(idx) = 1.0;
+        particles_.mass(idx) = 1.0;
+        particles_.mu(idx) = mu_;
+        particles_.T(idx) = initial_temperature_;
+        particles_.melting_energy(idx) = 0;
+        particles_.color.row(idx) << point_color_.x + double(i)/P.rows()/5,
+                                     point_color_.y + double(i)/P.rows()/15,
+                                     point_color_.z + double(i)/P.rows()/5;
+    }
+}
+
 void MpmHook::initGrid(int size) {
     grid_.v.resize(size, dimensions_);
     grid_.mass.resize(size, 1);
+    grid_.alpha.resize(size, 1);
     T_ = MatrixXd::Zero(size, 1); // Temperature
     f_ = MatrixXd::Zero(size, 1); // Source
 }
@@ -105,14 +166,18 @@ void MpmHook::drawGUI(igl::opengl::glfw::imgui::ImGuiMenu &menu)
 {
     if (ImGui::CollapsingHeader("Mesh", ImGuiTreeNodeFlags_DefaultOpen))
     {
+        ImGui::Checkbox("Enable Mesh", &enable_mesh_);
+        ImGui::InputInt("Mesh Points", &mesh_points_);
         ImGui::InputText("Filename", meshFile_);
+        ImGui::InputDouble("Mesh Scale", &mesh_scale_);
+        ImGui::InputDouble("Mesh Offset", &mesh_offset_);
     }
     if (ImGui::CollapsingHeader("Simulation Options", ImGuiTreeNodeFlags_DefaultOpen))
     {
         ImGui::Checkbox("Enable 3D", &is_3d_);
         ImGui::Checkbox("Enable Snow", &enable_snow_);
         ImGui::Checkbox("Enable placement", &enable_addbox_);
-        ImGui::Checkbox("Enable heat gun (right click)", &enable_heatgun_);
+        ImGui::Checkbox("Use Global Lame params", &use_global_lame_);
         ImGui::InputInt("Grid Resolution", &resolution_);
         ImGui::InputDouble("Timestep", &timestep_);
         ImGui::InputDouble("Gravity", &gravity_);
@@ -120,7 +185,16 @@ void MpmHook::drawGUI(igl::opengl::glfw::imgui::ImGuiMenu &menu)
         ImGui::InputDouble("Mu", &mu_);
         ImGui::InputDouble("Critical Compression", &theta_compression_);
         ImGui::InputDouble("Critical Stretch", &theta_stretch_);
+    }
+    if (ImGui::CollapsingHeader("Heat Options", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::Checkbox("Enable Heat", &enable_heat_);
+        ImGui::Checkbox("Enable heat gun (right click)", &enable_heatgun_);
+        ImGui::Checkbox("Enable Dirichlet Air", &enable_air_);
         ImGui::InputDouble("Thermal Diffusivity", &alpha_);
+        ImGui::InputDouble("Melting Point", &melting_point_);
+        ImGui::InputDouble("Initial Temperature", &initial_temperature_);
+        ImGui::InputInt("Transition Heat", &transition_heat_);
     }
     const char* listbox_items[] = { "Inferno", "Jet", "Magma", "Parula", "Plasma", "Viridis"};
     if (ImGui::CollapsingHeader("Render Options", ImGuiTreeNodeFlags_DefaultOpen))
@@ -196,24 +270,27 @@ void MpmHook::buildLaplacian() {
 
     std::vector<Triplet<double>> triplets;
 
-    double dt = 1e-0 * alpha_;
+    double dt = 1e-0 ;//* alpha_;
 
     for (int i = 0; i < T_.rows(); ++i) {
         int x = i / resolution_; // (resolution_*resolutoin_ for 3D)
         int y = i % resolution_;
 
-        if (grid_.mass(i) > 1e-7) {
+        double r = dt * std::clamp(grid_.alpha(i), 1.0, 1000.0);
+        if (!enable_air_) r = dt;
+        //std::cout << "r: " << r << std::endl;
+        if (!enable_air_ || (grid_.mass(i) > 1e-7)) {
 
-        triplets.emplace_back(Triplet<double>(i, i, 1 + 4*dt));
+            triplets.emplace_back(Triplet<double>(i, i, 1 + 4*r));
 
-        if ((x+1) < resolution_)
-            triplets.emplace_back(Triplet<double>(i, (x+1)*resolution_ + y, -dt));
-        if ((x-1) >= 0)
-            triplets.emplace_back(Triplet<double>(i, (x-1)*resolution_ + y, -dt));
-        if ((y+1) < resolution_)
-            triplets.emplace_back(Triplet<double>(i, x*resolution_ + (y+1), -dt));
-        if ((y-1) >= 0)
-            triplets.emplace_back(Triplet<double>(i, x*resolution_ + (y-1), -dt));
+            if ((x+1) < resolution_)
+                triplets.emplace_back(Triplet<double>(i, (x+1)*resolution_ + y, -r));
+            if ((x-1) >= 0)
+                triplets.emplace_back(Triplet<double>(i, (x-1)*resolution_ + y, -r));
+            if ((y+1) < resolution_)
+                triplets.emplace_back(Triplet<double>(i, x*resolution_ + (y+1), -r));
+            if ((y-1) >= 0)
+                triplets.emplace_back(Triplet<double>(i, x*resolution_ + (y-1), -r));
 
         } else {  triplets.emplace_back(Triplet<double>(i, i, dt)); }
     }
@@ -223,26 +300,20 @@ void MpmHook::buildLaplacian() {
 void MpmHook::initSimulation()
 {
     Eigen::initParallel();
-
     particles_.clear();
+    materials_.clear();
 
-    // Reading in mesh.
-    //Util::readMesh(meshFile_, V, F);
-
-    //// Scaling mesh to fill bounding box.
-    //Eigen::Vector3d min = V.colwise().minCoeff();
-    //V = V.rowwise() - min.transpose();
-    //V = V / V.maxCoeff();
-    //Eigen::Vector3d max = V.colwise().maxCoeff();
-    //V = V.array().rowwise() / max.transpose().array();
-    // Generating point cloud from mesh.
-    //particles_.x = Util::meshToPoints(V, F) * resolution_;
     grid_size_ = resolution_*resolution_;
     if (is_3d_) {
         grid_size_ *= resolution_;
     }
 
-    addParticleBox(Vector3d(resolution_/2.,resolution_/2.,16.), Vector3i(8,8,8), box_dx_);
+    if (enable_mesh_) {
+        addParticleMesh();
+    } else {
+        addParticleBox(Vector3d(resolution_/2.,resolution_/2.,16.), Vector3i(8,8,8), box_dx_);
+    }
+
     initGrid(grid_size_); // create domain
     buildLaplacian();
 
@@ -256,15 +327,19 @@ bool MpmHook::simulationStep() {
     bool failure = false; // Used to exit simulation loop when we hit a NaN.
     grid_.v.setZero();
     grid_.mass.setZero();
-
+    grid_.alpha.setZero();
     f_.setZero();
-    T_.setZero(); //TODO aaa
+
+    if (enable_air_)
+        T_.setZero(); //TODO aaa
 
     if (clickedVertex != -1) {
         if (enable_addbox_ && (button_ == 0)) {
+            curPos(2) = resolution_/2.;
             addParticleBox(curPos, Vector3i(8,8,8), box_dx_);
             clickedVertex = -1;
         } else if (enable_heatgun_ && (button_ == 2)) {
+            //TODO Only works in 2D
             Vector3i idx = curPos.cast<int>();
             int grid_i = idx(0) * resolution_ + idx(1);
             f_(grid_i) = 100.0;
@@ -281,8 +356,14 @@ bool MpmHook::simulationStep() {
         const Vector3d& vel = particles_.v.row(i);
         const Matrix3d& F = particles_.F[i];
         const double Jp = particles_.Jp(i);
-        const double mu = particles_.mu(i);
         const double mass = particles_.mass(i);
+
+        double lambda = lambda_;
+        double mu = particles_.mu(i);
+        if (use_global_lame_) mu = mu_;
+
+        int id = particles_.material_id(i);
+        const double alpha = materials_[id].alpha;
 
         // Interpolation
         Vector3i cell_idx = pos.cast<int>();
@@ -292,17 +373,9 @@ bool MpmHook::simulationStep() {
         weights.row(1) = 0.75 - diff.array().pow(2); 
         weights.row(2) = 0.5 * (0.5 + diff.array()).pow(2);
 
-        // Lame parameters
-        // Initial Lamé parameters
-        //const double mu_0 = E / (2 * (1 + nu));
-        //const double lambda_0 = E * nu / ((1+nu) * (1 - 2 * nu));
-        //double e = std::exp(hardening * (1.0 - Jp));
-        //double mu = mu_0 * e;
-        //double lambda = lambda_0 * e;
-
         // Neohoookean  MPM course eq 48
         Matrix3d F_T_inv = F.transpose().inverse();
-        Matrix3d P = mu*(F - F_T_inv) + lambda_*std::log(Jp)*F_T_inv;
+        Matrix3d P = mu*(F - F_T_inv) + lambda*std::log(Jp)*F_T_inv;
         Matrix3d stress = (1.0 / Jp) * P * F.transpose();
         stress = -Jp * 4 * stress * timestep_; // eq 16 MLS-MPM
 
@@ -346,9 +419,11 @@ bool MpmHook::simulationStep() {
                     {
                         grid_.mass(grid_i) += weighted_mass;
                         grid_.v.row(grid_i) += vel_momentum;
+                        grid_.alpha(grid_i) += weighted_mass * alpha;
 
                         // TODO aaa
-                        f_(grid_i) += weighted_mass * particles_.T(i);
+                        if (enable_air_)
+                            f_(grid_i) += weighted_mass * particles_.T(i);
                     }
 
                 }
@@ -380,30 +455,39 @@ bool MpmHook::simulationStep() {
             // cells that do no receive mass are considered air cells
             // so the temperature is zeroed out.
             // TODO aaa
-            f_(i) = 0.5;
+            if (enable_air_)
+                f_(i) = 0.0;
 
         }
     }
 
     // -------------------------------------------------------- //
-    //std::cout << " f_ : " << f_ << std::endl;
-    //f_ = T_; // Set new source!
-    ///////f_(0.5*resolution_*(resolution_ + 1)) = 10.0;
-    ///////// Solve temperature field update.
-    ///////buildLaplacian();
-    ///////ConjugateGradient<SparseMatrix<double>, Lower|Upper> solver;
-    ///////SparseMatrix<double> I(T_.rows(), T_.rows());
-    ///////I.setIdentity();
-    ///////solver.compute(L_);
-    ///////T_ = solver.solve(f_);
-    // ------------------------------------------------------- //
+    if (!enable_air_) {
+        f_ = T_; // Set new source!
+        f_(0.5*resolution_*(resolution_ + 1)) = 10.0;
+    }
 
-    #pragma omp parallel for
-    for (int i = 0; i < grid_size_; ++i) {
-        if (grid_.mass(i) < 1e-7) {
-            T_(i) = 0.;
+    if (enable_heat_) {
+        // Solve temperature field update.
+        buildLaplacian();
+        //ConjugateGradient<SparseMatrix<double>, Lower|Upper> solver;
+        SparseLU<SparseMatrix<double>> solver;
+        SparseMatrix<double> I(T_.rows(), T_.rows());
+        I.setIdentity();
+        solver.compute(L_);
+        T_ = solver.solve(f_);
+        //std::cout << "solver e: " << solver.error() << " iter: " << solver.iterations() << std::endl;
+    }
+
+    if (enable_air_) {
+        #pragma omp parallel for
+        for (int i = 0; i < grid_size_; ++i) {
+            if (grid_.mass(i) < 1e-7) {
+                T_(i) = 0.;
+            }
         }
     }
+    // ------------------------------------------------------- //
 
     particles_.v.setZero();
     particles_.T.setZero();
@@ -454,8 +538,14 @@ bool MpmHook::simulationStep() {
         }
         
         // Melt
-        if (particles_.T(i) > 0.8) {
-            particles_.mu(i) = 0.;
+        int id = particles_.material_id(i);
+        int transition_heat = materials_[id].transition_heat;
+
+        if (particles_.T(i) > materials_[id].melting_point) {
+            particles_.melting_energy(i) += 1;
+
+            if (particles_.melting_energy(i) > transition_heat)
+                particles_.mu(i) = 0.;
         }
 
         // advect particles
